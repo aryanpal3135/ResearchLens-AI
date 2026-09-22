@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Streamlit
+.streamlit/secrets.toml
+!.streamlit/secrets.toml.example
+.streamlit/runtime/
+
+# Environment Variables & Secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Data & Uploads
+data/uploads/*
+data/processed/*
+data/cache/
+data/cache/**
+data/indices/
+data/indices/**
+data/users.db
+*.db
+*.sqlite
+*.sqlite3
+!data/uploads/.gitkeep
+!data/processed/.gitkeep
+
+# Research PDFs (Strictly ignored)
+*.pdf
+*.PDF
+
+# Scratch and diagnostic scripts
+scratch/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing & Caches
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# OS generated
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
