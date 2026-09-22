@@ -11,7 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Generator, Optional, Tuple
 
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "users.db"
+DB_PATH = (
+    Path(os.getenv("SQLITE_DB_PATH"))
+    if os.getenv("SQLITE_DB_PATH")
+    else Path(__file__).resolve().parent.parent / "data" / "users.db"
+)
 
 
 class AuthService:

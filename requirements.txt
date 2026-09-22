@@ -14,6 +14,7 @@ numpy>=1.26.0
 
 # Azure AI & Microsoft Foundry Integration
 openai>=1.40.0
+azure-identity>=1.16.0
 httpx>=0.27.0
 requests>=2.32.0
 python-dotenv>=1.0.1
