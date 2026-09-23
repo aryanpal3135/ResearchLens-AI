@@ -4,9 +4,15 @@ Chat-First Academic Research Assistant powered by Microsoft Foundry and Hybrid R
 Features public landing page, user registration/login gating, and authenticated research workspace.
 """
 
+import os
 import sys
 from pathlib import Path
 import streamlit as st
+
+# Ensure Azure CLI standard path is present in PATH on Windows
+az_standard_path = r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin"
+if os.path.exists(az_standard_path) and az_standard_path not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = az_standard_path + os.pathsep + os.environ.get("PATH", "")
 
 # Add project root to sys.path for clean modular imports
 PROJECT_ROOT = Path(__file__).resolve().parent

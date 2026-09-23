@@ -86,7 +86,14 @@ class MicrosoftFoundryClient:
             os.environ["PATH"] = az_standard_path + os.pathsep + os.environ.get("PATH", "")
 
         if self._credential is None and AZURE_PROJECTS_AVAILABLE:
-            self._credential = DefaultAzureCredential()
+            try:
+                from azure.identity import AzureCliCredential, ChainedTokenCredential
+                self._credential = ChainedTokenCredential(
+                    AzureCliCredential(process_timeout=60),
+                    DefaultAzureCredential(process_timeout=60),
+                )
+            except Exception:
+                self._credential = DefaultAzureCredential(process_timeout=60)
         return self._credential
 
     def get_project_client(self) -> Optional[Any]:
@@ -286,17 +293,20 @@ class MicrosoftFoundryClient:
                 response = agent_openai.responses.create(**resp_kwargs)
 
                 extracted_texts = []
-                for item in getattr(response, "output", []):
-                    if hasattr(item, "content"):
-                        for c in item.content:
-                            if hasattr(c, "text"):
-                                extracted_texts.append(c.text)
-                            elif isinstance(c, dict) and "text" in c:
-                                extracted_texts.append(c["text"])
-                    elif hasattr(item, "text"):
-                        extracted_texts.append(item.text)
-
-                content = "\n".join(extracted_texts).strip() if extracted_texts else getattr(response, "text", "")
+                direct_output_text = getattr(response, "output_text", None)
+                if direct_output_text:
+                    content = direct_output_text.strip()
+                else:
+                    for item in getattr(response, "output", []):
+                        if hasattr(item, "content"):
+                            for c in item.content:
+                                if hasattr(c, "text"):
+                                    extracted_texts.append(c.text)
+                                elif isinstance(c, dict) and "text" in c:
+                                    extracted_texts.append(c["text"])
+                        elif hasattr(item, "text"):
+                            extracted_texts.append(item.text)
+                    content = "\n".join(extracted_texts).strip() if extracted_texts else getattr(response, "text", "")
                 model_used = getattr(response, "model", self.chat_deployment)
                 usage = getattr(response, "usage", None)
                 tokens_prompt = getattr(usage, "input_tokens", 0) if usage else 0
