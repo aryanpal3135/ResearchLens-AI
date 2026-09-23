@@ -480,7 +480,9 @@ class ResearchLensAgent:
         try:
             import streamlit as st
             if hasattr(st, "session_state") and "foundry_status_cached" in st.session_state:
-                return st.session_state["foundry_status_cached"]
+                cached = st.session_state["foundry_status_cached"]
+                if isinstance(cached, dict) and not hasattr(cached.get("deployment"), "_mock_name"):
+                    return cached
         except Exception:
             pass
 
@@ -880,7 +882,7 @@ class ResearchLensAgent:
             user_prompt=prompt_task,
             system_prompt=SYSTEM_PROMPT_COMPARISON_AGENT,
             temperature=0.1,
-            max_tokens=4000,
+            max_tokens=2200,
         )
 
         elapsed_ms = (time.time() - start_time) * 1000
@@ -1226,7 +1228,7 @@ class ResearchLensAgent:
             user_prompt=prompt_task,
             system_prompt=SYSTEM_PROMPT_GAP_AGENT,
             temperature=0.1,
-            max_tokens=3500,
+            max_tokens=2200,
         )
 
         elapsed_ms = (time.time() - start_time) * 1000
@@ -1539,7 +1541,7 @@ class ResearchLensAgent:
             user_prompt=prompt_task,
             system_prompt=SYSTEM_PROMPT_QUESTION_AGENT,
             temperature=0.1,
-            max_tokens=3500,
+            max_tokens=2200,
         )
 
         elapsed_ms = (time.time() - start_time) * 1000
@@ -2205,7 +2207,7 @@ class ResearchLensAgent:
             user_prompt=prompt_task,
             system_prompt=SYSTEM_PROMPT_LITERATURE_REVIEW_AGENT,
             temperature=0.15,
-            max_tokens=3800,
+            max_tokens=2400,
         )
         generation_latency_ms = (time.time() - gen_start) * 1000
 
