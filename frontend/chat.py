@@ -280,8 +280,8 @@ def render_chat_page():
                             unsafe_allow_html=True,
                         )
 
-            # Read Aloud & Translation controls for assistant answers
-            if msg["role"] == "assistant" and msg_idx > 0:
+            # Read Aloud & Translation controls for assistant answers (all assistant messages)
+            if msg["role"] == "assistant":
                 audio_cache_key = f"audio_cache_{msg_idx}"
                 audio_tr_cache_key = f"audio_tr_cache_{msg_idx}"
 
@@ -336,9 +336,9 @@ def render_chat_page():
                                 del st.session_state[audio_tr_cache_key]
                             st.rerun()
 
-                # Render audio player for main answer if synthesized
+                # Render audio player for main answer with automatic playback
                 if audio_cache_key in st.session_state:
-                    st.audio(st.session_state[audio_cache_key], format="audio/mp3")
+                    st.audio(st.session_state[audio_cache_key], format="audio/wav", autoplay=True)
 
                 # Render translated output container with its own Read Aloud
                 if f"translated_{msg_idx}" in st.session_state:
@@ -367,7 +367,7 @@ def render_chat_page():
                                         st.error(f"❌ Azure Speech Error: {str(e)}")
 
                         if audio_tr_cache_key in st.session_state:
-                            st.audio(st.session_state[audio_tr_cache_key], format="audio/mp3")
+                            st.audio(st.session_state[audio_tr_cache_key], format="audio/wav", autoplay=True)
 
     # --------------------------------------------------------------------------
     # 4. Handle Voice Input & Chat Input (Unified Pipeline)
@@ -452,7 +452,7 @@ def render_chat_page():
             )
 
             if audio_recording is not None:
-                audio_bytes = audio_recording.read()
+                audio_bytes = audio_recording.getvalue() if hasattr(audio_recording, "getvalue") else audio_recording.read()
                 audio_hash = f"audio_{len(audio_bytes)}_{audio_bytes[:24]}"
                 if st.session_state.get("last_processed_audio_hash") != audio_hash:
                     with st.spinner(f"Transcribing speech via Azure AI Speech ({selected_voice_lang})..."):
@@ -468,16 +468,13 @@ def render_chat_page():
                                 if auto_send_enabled:
                                     # ChatGPT style: immediately submit the recognized query!
                                     voice_submitted_query = rec_result.text
-                                    st.session_state["voice_widget_version"] = st.session_state.get("voice_widget_version", 0) + 1
-                                    st.session_state["last_processed_audio_hash"] = None
                                     st.session_state["recognized_voice_query"] = ""
-                                    st.session_state["voice_mode_open"] = False
                                     # DO NOT rerun here; let it flow to user_query below so it executes!
                                 else:
                                     st.session_state["recognized_voice_query"] = rec_result.text
                                     st.rerun()
                             elif rec_result.reason == "NoMatch":
-                                st.warning("⚠️ Could not understand the speech. Please try again.")
+                                st.warning("⚠️ Could not understand the speech. Please speak clearly or try again.")
                             elif rec_result.reason == "TooLong":
                                 st.warning("⚠️ Your voice prompt was too long. Please try a shorter prompt.")
                             else:
@@ -508,8 +505,6 @@ def render_chat_page():
                             voice_submitted_query = edited_query.strip()
                             st.session_state["recognized_voice_query"] = ""
                             st.session_state["voice_mode_open"] = False
-                            st.session_state["voice_widget_version"] = st.session_state.get("voice_widget_version", 0) + 1
-                            st.session_state["last_processed_audio_hash"] = None
                             # DO NOT rerun here; let it flow to user_query below so it executes!
                 with col_clear:
                     if st.button(t("clear_voice_prompt", "🔄 Clear Recording"), key="btn_clear_voice_query"):
@@ -520,11 +515,12 @@ def render_chat_page():
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # Standard Chat Input (with embedded microphone directly inside chat input, exactly like ChatGPT)
+    # Standard Chat Input (with embedded microphone directly inside chat_input, exactly like ChatGPT)
     raw_chat_input = st.chat_input(
         placeholder=t("chat_placeholder", "Ask ResearchLens anything about your papers..."),
         key="main_chat_input",
         accept_audio=True,
+        audio_sample_rate=16000,
     )
 
     # Extract query from raw_chat_input (handles string or ChatInputValue from embedded mic)
@@ -538,7 +534,7 @@ def render_chat_page():
             audio_val = getattr(raw_chat_input, "audio", None)
             if audio_val is not None and not text_val:
                 with st.spinner("🎙️ Transcribing voice via Azure AI Speech..."):
-                    audio_bytes = audio_val.read()
+                    audio_bytes = audio_val.getvalue() if hasattr(audio_val, "getvalue") else audio_val.read()
                     if speech_svc.is_configured:
                         rec_res = speech_svc.recognize_speech_from_audio(
                             audio_data=audio_bytes,

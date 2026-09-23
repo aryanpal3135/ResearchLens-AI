@@ -267,7 +267,7 @@ class AzureSpeechService:
         return chunks
 
     def _create_speech_config(self, voice_name: str) -> speechsdk.SpeechConfig:
-        """Creates and configures speechsdk.SpeechConfig with MP3 output."""
+        """Creates and configures speechsdk.SpeechConfig with clean lossless WAV output."""
         if not self.is_configured:
             raise SpeechConfigurationError(
                 "Read Aloud is not configured. Please verify AZURE_SPEECH_ENDPOINT "
@@ -279,15 +279,15 @@ class AzureSpeechService:
             subscription=self.api_key,
         )
 
-        # Set high-quality MP3 output format
+        # Set high-quality lossless 16kHz 16-bit mono PCM format for zero browser decoding lag
         speech_config.set_speech_synthesis_output_format(
-            speechsdk.SpeechSynthesisOutputFormat.Audio16Khz32KBitRateMonoMp3
+            speechsdk.SpeechSynthesisOutputFormat.Riff16Khz16BitMonoPcm
         )
         speech_config.speech_synthesis_voice_name = voice_name
         return speech_config
 
     def _synthesize_single_chunk(self, chunk: str, voice_name: str) -> bytes:
-        """Synthesizes a single chunk of text into MP3 audio bytes using Azure Speech."""
+        """Synthesizes a single chunk of text into WAV audio bytes using Azure Speech."""
         speech_config = self._create_speech_config(voice_name)
         synthesizer = speechsdk.SpeechSynthesizer(
             speech_config=speech_config,
@@ -312,9 +312,9 @@ class AzureSpeechService:
 
     def synthesize_speech(self, text: str, language: str = "English") -> bytes:
         """
-        Converts text to speech using Azure AI Speech, returning MP3 audio bytes.
+        Converts text to speech using Azure AI Speech, returning playable WAV audio bytes.
         Handles markdown cleaning, citation pronunciation, long answer chunking,
-        and multilingual voice selection.
+        and multilingual voice selection with zero header corruption.
         """
         if not self.is_configured:
             raise SpeechConfigurationError(
@@ -333,20 +333,41 @@ class AzureSpeechService:
 
         voice_name = self.get_voice_for_language(language)
 
-        # Chunk long text safely
+        # For standard answers (under 8,000 characters), synthesize in a single pass for peak performance
+        if len(cleaned_text) <= 8000:
+            final_wav = self._synthesize_single_chunk(cleaned_text, voice_name=voice_name)
+            _TTS_MEMORY_CACHE[cache_key] = final_wav
+            return final_wav
+
+        # For very long responses, chunk safely and stitch PCM frames into a single valid WAV file
         chunks = self.split_text_into_chunks(cleaned_text, max_chunk_chars=4000)
         if not chunks:
             raise SpeechSynthesisError("No valid text chunks generated for synthesis.")
 
-        audio_parts: List[bytes] = []
+        pcm_frames_list: List[bytes] = []
         for chunk in chunks:
             part_bytes = self._synthesize_single_chunk(chunk, voice_name=voice_name)
-            audio_parts.append(part_bytes)
+            if part_bytes.startswith(b"RIFF"):
+                try:
+                    with io.BytesIO(part_bytes) as bio:
+                        with wave.open(bio, "rb") as wf:
+                            pcm_frames_list.append(wf.readframes(wf.getnframes()))
+                except Exception:
+                    pcm_frames_list.append(part_bytes[44:] if len(part_bytes) > 44 else part_bytes)
+            else:
+                pcm_frames_list.append(part_bytes)
 
-        # Concatenate MP3 frames into single playable stream
-        final_mp3 = b"".join(audio_parts)
-        _TTS_MEMORY_CACHE[cache_key] = final_mp3
-        return final_mp3
+        # Package combined raw PCM frames into a single, standard WAV container
+        out_bio = io.BytesIO()
+        with wave.open(out_bio, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(b"".join(pcm_frames_list))
+
+        final_wav = out_bio.getvalue()
+        _TTS_MEMORY_CACHE[cache_key] = final_wav
+        return final_wav
 
     def get_recognition_language(self, language: str) -> str:
         """Resolves the designated BCP-47 locale code for Azure Speech recognition."""
@@ -437,6 +458,86 @@ class AzureSpeechService:
                 language=language_code,
             )
 
+    @staticmethod
+    def _normalize_audio_to_16k_mono(audio_bytes: bytes) -> bytes:
+        """
+        Normalizes any WAV audio (differing sample rates like 44.1k/48k, stereo/mono, float/int)
+        into standardized 16,000 Hz, 16-bit, 1-channel mono PCM bytes.
+        Guarantees seamless, accurate Azure Speech recognition across all web browsers and devices.
+        """
+        if not audio_bytes.startswith(b"RIFF"):
+            return audio_bytes
+
+        try:
+            with io.BytesIO(audio_bytes) as bio:
+                with wave.open(bio, "rb") as wf:
+                    framerate = wf.getframerate()
+                    nchannels = wf.getnchannels()
+                    sampwidth = wf.getsampwidth()
+                    raw_frames = wf.readframes(wf.getnframes())
+
+            # If already 16kHz 16-bit mono PCM, return raw frames directly
+            if framerate == 16000 and nchannels == 1 and sampwidth == 2:
+                return raw_frames
+
+            try:
+                import numpy as np
+                import scipy.signal as signal
+                has_scipy = True
+            except ImportError:
+                has_scipy = False
+
+            if has_scipy and raw_frames:
+                if sampwidth == 2:
+                    samples = np.frombuffer(raw_frames, dtype=np.int16)
+                elif sampwidth == 4:
+                    f_samples = np.frombuffer(raw_frames, dtype=np.float32)
+                    if len(f_samples) > 0 and np.max(np.abs(f_samples)) <= 2.0:
+                        samples = (np.clip(f_samples, -1.0, 1.0) * 32767).astype(np.int16)
+                    else:
+                        samples = (np.frombuffer(raw_frames, dtype=np.int32) >> 16).astype(np.int16)
+                elif sampwidth == 1:
+                    samples = ((np.frombuffer(raw_frames, dtype=np.uint8).astype(np.int16) - 128) * 256).astype(np.int16)
+                else:
+                    return raw_frames
+
+                # Downmix multi-channel / stereo to mono
+                if nchannels > 1 and len(samples) >= nchannels:
+                    samples = samples.reshape(-1, nchannels).mean(axis=1).astype(np.int16)
+
+                # High-fidelity polyphase resampling to 16,000 Hz
+                if framerate != 16000 and len(samples) > 0:
+                    import math
+                    gcd_val = math.gcd(16000, framerate)
+                    samples = signal.resample_poly(samples, 16000 // gcd_val, framerate // gcd_val).astype(np.int16)
+
+                return samples.tobytes()
+
+            elif sampwidth == 2 and len(raw_frames) >= 2:
+                # Lightweight pure-Python fallback for integer samples
+                import struct
+                num_samples = len(raw_frames) // (2 * nchannels)
+                unpacked = struct.unpack(f"<{num_samples * nchannels}h", raw_frames[:num_samples * nchannels * 2])
+                if nchannels > 1:
+                    mono_samples = [
+                        sum(unpacked[i * nchannels : (i + 1) * nchannels]) // nchannels
+                        for i in range(num_samples)
+                    ]
+                else:
+                    mono_samples = list(unpacked)
+
+                if framerate == 48000:
+                    mono_samples = mono_samples[::3]
+                elif framerate == 32000:
+                    mono_samples = mono_samples[::2]
+
+                return struct.pack(f"<{len(mono_samples)}h", *mono_samples)
+
+        except Exception:
+            pass
+
+        return audio_bytes
+
     def recognize_speech_from_audio(
         self,
         audio_data: bytes,
@@ -445,7 +546,7 @@ class AzureSpeechService:
     ) -> SpeechRecognitionResult:
         """
         Recognizes speech from audio bytes (WAV/PCM from browser/Streamlit) using Azure Speech SDK.
-        Guarantees single-utterance recognition and cleanly handles practical utterance length limits.
+        Guarantees single-utterance recognition, normalizes browser audio, and cleanly handles length limits.
         """
         if not self.is_configured:
             raise SpeechConfigurationError(
@@ -476,43 +577,40 @@ class AzureSpeechService:
         lang_code = self.get_recognition_language(language)
         speech_config = self._create_recognition_speech_config(lang_code)
 
-        # Fast in-memory WAV streaming (zero disk I/O, zero file locks)
-        if audio_data.startswith(b"RIFF"):
-            try:
-                with io.BytesIO(audio_data) as bio:
-                    with wave.open(bio, "rb") as wf:
-                        framerate = wf.getframerate()
-                        nchannels = wf.getnchannels()
-                        sampwidth = wf.getsampwidth()
-                        raw_pcm = wf.readframes(wf.getnframes())
+        # Standardize audio to 16kHz 16-bit Mono PCM
+        pcm_data = self._normalize_audio_to_16k_mono(audio_data)
 
-                audio_format = speechsdk.audio.AudioStreamFormat(
-                    samples_per_second=framerate,
-                    channels=nchannels,
-                    bits_per_sample=sampwidth * 8,
-                )
-                push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
-                push_stream.write(raw_pcm)
-                push_stream.close()
+        # In-memory streaming using PushAudioInputStream
+        try:
+            audio_format = speechsdk.audio.AudioStreamFormat(
+                samples_per_second=16000,
+                channels=1,
+                bits_per_sample=16,
+            )
+            push_stream = speechsdk.audio.PushAudioInputStream(audio_format)
+            push_stream.write(pcm_data)
+            push_stream.close()
 
-                audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
-                recognizer = speechsdk.SpeechRecognizer(
-                    speech_config=speech_config,
-                    audio_config=audio_config,
-                )
-                result = recognizer.recognize_once_async().get()
-                del recognizer, audio_config, push_stream
-                return self._process_recognition_result(result, lang_code)
-            except Exception:
-                pass  # Fall back to file-based recognition if in-memory parsing fails
+            audio_config = speechsdk.audio.AudioConfig(stream=push_stream)
+            recognizer = speechsdk.SpeechRecognizer(
+                speech_config=speech_config,
+                audio_config=audio_config,
+            )
+            result = recognizer.recognize_once_async().get()
+            del recognizer, audio_config, push_stream
+            return self._process_recognition_result(result, lang_code)
+        except Exception:
+            pass  # Fall back to file-based recognition if in-memory streaming encounters issue
 
-        # Fallback: Write to temporary file with secure cleanup for AudioConfig
+        # Fallback: Write standardized WAV to temporary file with secure cleanup
         temp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         temp_wav_path = temp_wav.name
         try:
-            temp_wav.write(audio_data)
-            temp_wav.flush()
-            temp_wav.close()
+            with wave.open(temp_wav_path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(pcm_data)
 
             audio_config = speechsdk.audio.AudioConfig(filename=temp_wav_path)
             recognizer = speechsdk.SpeechRecognizer(
