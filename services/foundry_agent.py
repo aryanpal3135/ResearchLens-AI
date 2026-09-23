@@ -779,10 +779,14 @@ class ResearchLensAgent:
 
         def _retrieve_dim(dim_item):
             dim_name, query_intent, _ = dim_item
-            res_a = engine.retrieve(query=query_intent, paper_ids=[paper_a.id], top_k=3, search_mode="hybrid")
-            b_a = self.bundler.build_bundle(query=query_intent, results=res_a, retrieval_mode="hybrid").items if res_a else []
-            res_b = engine.retrieve(query=query_intent, paper_ids=[paper_b.id], top_k=3, search_mode="hybrid")
-            b_b = self.bundler.build_bundle(query=query_intent, results=res_b, retrieval_mode="hybrid").items if res_b else []
+            t_a = paper_titles[paper_a.id][:60]
+            t_b = paper_titles[paper_b.id][:60]
+            q_a = f"{t_a} {query_intent}".strip()
+            q_b = f"{t_b} {query_intent}".strip()
+            res_a = engine.retrieve(query=q_a, paper_ids=[paper_a.id], top_k=3, search_mode="hybrid")
+            b_a = self.bundler.build_bundle(query=q_a, results=res_a, retrieval_mode="hybrid").items if res_a else []
+            res_b = engine.retrieve(query=q_b, paper_ids=[paper_b.id], top_k=3, search_mode="hybrid")
+            b_b = self.bundler.build_bundle(query=q_b, results=res_b, retrieval_mode="hybrid").items if res_b else []
             return dim_name, b_a, b_b
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(COMPARISON_DIMENSIONS), 10)) as executor:
@@ -859,24 +863,17 @@ class ResearchLensAgent:
 
         prompt_task += (
             "Instructions:\n"
-            "1. Produce an academically rigorous, evidence-grounded comparison across the 10 dimensions.\n"
+            "1. Produce an academically rigorous, evidence-grounded comparison across ALL 10 dimensions listed below.\n"
             "2. For each dimension, provide:\n"
-            "   - paper_a_summary: 2-3 specific, factual sentences for Paper A detailing exact methods, numbers, or findings from the evidence.\n"
-            "   - paper_b_summary: 2-3 specific, factual sentences for Paper B detailing exact methods, numbers, or findings from the evidence.\n"
-            "   - synthesis: 2 sentences providing neutral comparative contrast between the two.\n"
+            "   - paper_a_summary: 1-2 concise, factual sentences for Paper A detailing exact methods, numbers, or findings from the evidence.\n"
+            "   - paper_b_summary: 1-2 concise, factual sentences for Paper B detailing exact methods, numbers, or findings from the evidence.\n"
+            "   - synthesis: 1-2 sentences providing neutral comparative contrast between the two.\n"
             "3. Identify 2-4 key SIMILARITIES where both papers share methodology, principles, or properties. Each similarity MUST cite both papers.\n"
             "4. Identify 3-5 key DIFFERENCES where the papers diverge. Clearly distinguish which approach belongs to Paper A vs Paper B.\n"
-            "5. If a custom comparison question was provided, answer it thoroughly in 'custom_query_answer'.\n"
+            "5. In 'custom_query_answer', provide a concise executive comparative synthesis (1-2 paragraphs).\n"
             "6. DO NOT declare a winner, superior paper, or rank papers.\n"
-            "7. Return strictly valid JSON adhering to this schema:\n"
+            "7. Return strictly valid JSON adhering to this schema (IMPORTANT: 'dimensions' MUST come first):\n"
             "{\n"
-            '  "custom_query_answer": "Concise executive comparative synthesis (1-2 paragraphs) addressing the query.",\n'
-            '  "similarities": [\n'
-            '     {"topic": "...", "description": "...", "paper_a_claim": "...", "paper_b_claim": "..."}\n'
-            '  ],\n'
-            '  "differences": [\n'
-            '     {"topic": "...", "description": "...", "paper_a_claim": "...", "paper_b_claim": "..."}\n'
-            '  ],\n'
             '  "dimensions": {\n'
             '     "Research Objective": {"paper_a_summary": "...", "paper_b_summary": "...", "synthesis": "..."},\n'
             '     "Problem / Motivation": {"paper_a_summary": "...", "paper_b_summary": "...", "synthesis": "..."},\n'
@@ -888,7 +885,14 @@ class ResearchLensAgent:
             '     "Main Findings": {"paper_a_summary": "...", "paper_b_summary": "...", "synthesis": "..."},\n'
             '     "Limitations": {"paper_a_summary": "...", "paper_b_summary": "...", "synthesis": "..."},\n'
             '     "Contributions": {"paper_a_summary": "...", "paper_b_summary": "...", "synthesis": "..."}\n'
-            '  }\n'
+            '  },\n'
+            '  "similarities": [\n'
+            '     {"topic": "...", "description": "...", "paper_a_claim": "...", "paper_b_claim": "..."}\n'
+            '  ],\n'
+            '  "differences": [\n'
+            '     {"topic": "...", "description": "...", "paper_a_claim": "...", "paper_b_claim": "..."}\n'
+            '  ],\n'
+            '  "custom_query_answer": "Concise executive comparative synthesis (1-2 paragraphs)."\n'
             "}"
         )
 
@@ -897,7 +901,7 @@ class ResearchLensAgent:
             user_prompt=prompt_task,
             system_prompt=SYSTEM_PROMPT_COMPARISON_AGENT,
             temperature=0.1,
-            max_tokens=2200,
+            max_tokens=3500,
         )
 
         elapsed_ms = (time.time() - start_time) * 1000
@@ -921,6 +925,41 @@ class ResearchLensAgent:
 
         dims_dict: Dict[str, DimensionComparisonItem] = {}
         parsed_dims = parsed.get("dimensions", {})
+
+        # Robust recovery: If parsed_dims is empty, attempt to extract "dimensions": { ... } directly from raw_json
+        if not parsed_dims and '"dimensions"' in raw_json:
+            try:
+                import json
+                d_idx = raw_json.find('"dimensions"')
+                brace_start = raw_json.find('{', d_idx)
+                if brace_start != -1:
+                    depth = 0
+                    in_str = False
+                    escape = False
+                    d_end = -1
+                    for i in range(brace_start, len(raw_json)):
+                        ch = raw_json[i]
+                        if escape:
+                            escape = False
+                            continue
+                        if ch == '\\':
+                            escape = True
+                            continue
+                        if ch == '"':
+                            in_str = not in_str
+                            continue
+                        if not in_str:
+                            if ch == '{':
+                                depth += 1
+                            elif ch == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    d_end = i
+                                    break
+                    if d_end != -1:
+                        parsed_dims = json.loads(raw_json[brace_start : d_end + 1])
+            except Exception:
+                pass
 
         # Flexible key lookup for dimensions
         normalized_parsed_dims: Dict[str, Dict[str, Any]] = {}
@@ -954,6 +993,8 @@ class ResearchLensAgent:
             # Flexible extraction of summary for Paper A and Paper B
             def _extract_paper_summary(d: dict, p_id: str, p_title: str, alt_keys: list) -> str:
                 if not isinstance(d, dict):
+                    if isinstance(d, str) and d.strip():
+                        return d.strip()
                     return "Not clearly identified in the retrieved evidence."
                 for k in [f"{p_id}_summary", p_id, f"paper_{p_id[-1]}_summary", f"paper_{p_id[-1]}", *alt_keys]:
                     val = d.get(k)
@@ -973,6 +1014,31 @@ class ResearchLensAgent:
                 ["paper_b_summary", "paper_b", "Paper B", "Paper B Summary", "paper_2_summary", "paper_2"]
             )
 
+            # Grounded fallback: If evidence was retrieved but summary is still default fallback, extract direct sentence
+            if ("Not clearly identified" in sum_a or not sum_a) and ev_a:
+                top_text = ev_a[0].text.strip()
+                sentences = [s.strip() for s in top_text.split(". ") if len(s.strip()) > 15]
+                if sentences:
+                    sum_a = sentences[0] if sentences[0].endswith(".") else f"{sentences[0]}."
+                    if len(sentences) > 1 and len(sum_a) < 140:
+                        sum_a += f" {sentences[1]}" + ("." if not sentences[1].endswith(".") else "")
+                else:
+                    sum_a = top_text[:220] + ("..." if len(top_text) > 220 else "")
+
+            if ("Not clearly identified" in sum_b or not sum_b) and ev_b:
+                top_text = ev_b[0].text.strip()
+                sentences = [s.strip() for s in top_text.split(". ") if len(s.strip()) > 15]
+                if sentences:
+                    sum_b = sentences[0] if sentences[0].endswith(".") else f"{sentences[0]}."
+                    if len(sentences) > 1 and len(sum_b) < 140:
+                        sum_b += f" {sentences[1]}" + ("." if not sentences[1].endswith(".") else "")
+                else:
+                    sum_b = top_text[:220] + ("..." if len(top_text) > 220 else "")
+
+            syn = p_dim.get("synthesis", p_dim.get("comparison", p_dim.get("contrast", ""))) if isinstance(p_dim, dict) else ""
+            if not syn and sum_a != "Not clearly identified in the retrieved evidence." and sum_b != "Not clearly identified in the retrieved evidence.":
+                syn = f"Paper A focuses on {paper_titles[paper_a.id][:40]}, while Paper B investigates {paper_titles[paper_b.id][:40]}."
+
             dims_dict[dim_name] = DimensionComparisonItem(
                 dimension_name=dim_name,
                 paper_summaries={
@@ -983,33 +1049,59 @@ class ResearchLensAgent:
                     paper_a.id: ev_a,
                     paper_b.id: ev_b,
                 },
-                synthesis=p_dim.get("synthesis", p_dim.get("comparison", p_dim.get("contrast", ""))),
+                synthesis=syn or "Comparative contrast grounded in the evidence presented above.",
                 is_explicit=True,
                 citation_labels=citation_labels,
                 evidence_items=dim_ev,
             )
 
-
         similarities: List[ComparisonPoint] = []
         for s in parsed.get("similarities", []):
-            similarities.append(
-                ComparisonPoint(
-                    topic=s.get("topic", "Similarity"),
-                    description=s.get("description", ""),
-                    paper_a_claim=s.get("paper_a_claim", ""),
-                    paper_b_claim=s.get("paper_b_claim", ""),
+            if isinstance(s, dict):
+                similarities.append(
+                    ComparisonPoint(
+                        topic=s.get("topic", "Similarity"),
+                        description=s.get("description", ""),
+                        paper_a_claim=s.get("paper_a_claim", ""),
+                        paper_b_claim=s.get("paper_b_claim", ""),
+                    )
                 )
-            )
 
         differences: List[ComparisonPoint] = []
         for d in parsed.get("differences", []):
-            differences.append(
-                ComparisonPoint(
-                    topic=d.get("topic", "Difference"),
-                    description=d.get("description", ""),
-                    paper_a_claim=d.get("paper_a_claim", ""),
-                    paper_b_claim=d.get("paper_b_claim", ""),
+            if isinstance(d, dict):
+                differences.append(
+                    ComparisonPoint(
+                        topic=d.get("topic", "Difference"),
+                        description=d.get("description", ""),
+                        paper_a_claim=d.get("paper_a_claim", ""),
+                        paper_b_claim=d.get("paper_b_claim", ""),
+                    )
                 )
+
+        # Sanitize custom_query_answer so raw JSON is NEVER returned as the text answer
+        cqa = parsed.get("custom_query_answer") or parsed.get("executive_synthesis")
+        if not cqa:
+            raw_ans = parsed.get("answer", "")
+            if isinstance(raw_ans, str) and not raw_ans.strip().startswith("{") and '"custom_query_answer"' not in raw_ans:
+                cqa = raw_ans.strip()
+
+        if isinstance(cqa, str) and (cqa.strip().startswith("{") or '"custom_query_answer"' in cqa):
+            try:
+                import json, re
+                m = re.search(r'"custom_query_answer"\s*:\s*"([^"]+)"', cqa)
+                if m:
+                    cqa = m.group(1).replace("\\n", "\n").replace('\\"', '"')
+                else:
+                    p = json.loads(cqa)
+                    cqa = p.get("custom_query_answer") or p.get("answer")
+            except Exception:
+                cqa = None
+
+        if not cqa or not isinstance(cqa, str) or cqa.strip().startswith("{"):
+            cqa = (
+                f"Comparative synthesis of **{paper_titles[paper_a.id]}** and **{paper_titles[paper_b.id]}** "
+                f"across 10 core academic dimensions. See detailed breakdown and contrast below."
             )
 
         return MultiPaperComparison(
@@ -1020,7 +1112,7 @@ class ResearchLensAgent:
             dimensions=dims_dict,
             similarities=similarities,
             differences=differences,
-            custom_query_answer=parsed.get("custom_query_answer") or parsed.get("answer") or parsed.get("executive_synthesis") or None,
+            custom_query_answer=cqa,
             all_evidence_items=all_evidence,
             status="completed",
             execution_latency_ms=round(elapsed_ms, 2),

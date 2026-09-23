@@ -170,15 +170,28 @@ def render_comparison_page():
 
     # 1. Executive / Focused Synthesis Callout (Prominently displayed)
     if cached_comparison.custom_query_answer:
-        st.markdown("### 🎯 Executive Comparative Synthesis")
-        st.markdown(
-            f"""
-            <div style="background-color: #0F172A; border-left: 4px solid #38BDF8; padding: 14px 18px; border-radius: 6px; margin-bottom: 20px; line-height: 1.6; font-size: 1rem; color: #F1F5F9;">
-                {cached_comparison.custom_query_answer}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        cqa_text = str(cached_comparison.custom_query_answer).strip()
+        if cqa_text.startswith("{") and ('"custom_query_answer"' in cqa_text or '"dimensions"' in cqa_text or '"answer"' in cqa_text):
+            try:
+                import json
+                p_cqa = json.loads(cqa_text)
+                cqa_text = p_cqa.get("custom_query_answer") or p_cqa.get("answer") or cqa_text
+            except Exception:
+                import re
+                m = re.search(r'"custom_query_answer"\s*:\s*"([^"]+)"', cqa_text)
+                if m:
+                    cqa_text = m.group(1).replace("\\n", "\n").replace('\\"', '"')
+
+        if cqa_text and not cqa_text.startswith("{"):
+            st.markdown("### 🎯 Executive Comparative Synthesis")
+            st.markdown(
+                f"""
+                <div style="background-color: #0F172A; border-left: 4px solid #38BDF8; padding: 14px 18px; border-radius: 6px; margin-bottom: 20px; line-height: 1.6; font-size: 1rem; color: #F1F5F9;">
+                    {cqa_text}
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
     # 2. Cross-Paper Similarities & Differences (Immediately visible)
     st.markdown("### 🧩 Key Similarities & Core Differences")

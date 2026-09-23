@@ -394,3 +394,69 @@ def test_phase4_agent_regression_check(dual_paper_engine):
     ans = agent.answer_question(query="What is attention?", paper_id=paper_a.id, engine=engine)
     assert ans.confidence_status == "grounded"
     assert len(ans.evidence_items) > 0
+
+
+def test_comparison_dimension_first_and_json_safety(dual_paper_engine):
+    """15. Validates dimensions-first schema and ensures custom_query_answer never renders raw JSON."""
+    engine, paper_a, paper_b = dual_paper_engine
+    mock_client = MagicMock(spec=MicrosoftFoundryClient)
+    mock_client.is_configured = True
+    mock_client.chat_deployment = "gpt-4.1-mini"
+    
+    # Simulate response adhering to the new dimensions-first schema
+    mock_client.generate_chat_response.return_value = {
+        "success": True,
+        "content": """{
+            "dimensions": {
+                "Research Objective": {"paper_a_summary": "Transformers discard recurrence.", "paper_b_summary": "BERT uses bidirectional pretraining.", "synthesis": "Both advance sequence representation."},
+                "Methodology": {"paper_a_summary": "Self-attention mechanism.", "paper_b_summary": "Masked language model.", "synthesis": "Contrasting autoregressive vs bidirectional targets."}
+            },
+            "similarities": [{"topic": "Self-Attention", "description": "Both use multi-head attention.", "paper_a_claim": "Defines multi-head attention.", "paper_b_claim": "Uses multi-head attention."}],
+            "differences": [{"topic": "Pretraining", "description": "Translation vs Pretraining.", "paper_a_claim": "Supervised MT.", "paper_b_claim": "Self-supervised MLM."}],
+            "custom_query_answer": "Paper A focuses on translation architecture while Paper B focuses on pre-trained language modeling."
+        }""",
+        "model": "gpt-4.1-mini",
+    }
+
+    agent = ResearchLensAgent(foundry_client=mock_client)
+    comp = agent.compare_papers(papers=[paper_a, paper_b], engine=engine)
+    assert comp.status == "completed"
+    assert not comp.custom_query_answer.strip().startswith("{")
+    assert '"custom_query_answer"' not in comp.custom_query_answer
+    assert "Research Objective" in comp.dimensions
+    assert comp.dimensions["Research Objective"].paper_summaries[paper_a.id] == "Transformers discard recurrence."
+    # Grounded evidence fallback kicks in for dimensions omitted in the LLM response where evidence was retrieved
+    assert "Methodology" in comp.dimensions
+    assert len(comp.dimensions) == 10
+
+
+def test_comparison_partial_truncation_recovery(dual_paper_engine):
+    """16. Validates robust recovery when model response is truncated after dimensions."""
+    engine, paper_a, paper_b = dual_paper_engine
+    mock_client = MagicMock(spec=MicrosoftFoundryClient)
+    mock_client.is_configured = True
+    mock_client.chat_deployment = "gpt-4.1-mini"
+
+    # Truncated response cutting off mid-stream after dimensions
+    mock_client.generate_chat_response.return_value = {
+        "success": True,
+        "content": """{
+            "dimensions": {
+                "Research Objective": {"paper_a_summary": "Transformers discard recurrence.", "paper_b_summary": "BERT pretrains bidirectionally.", "synthesis": "Different objectives."},
+                "Architecture / Model": {"paper_a_summary": "6 encoder and decoder layers.", "paper_b_summary": "12 to 24 encoder layers.", "synthesis": "BERT is encoder-only."}
+            },
+            "similarities": [
+                {"topic": "Attention", "description": "Both use self-attention""",
+        "model": "gpt-4.1-mini",
+    }
+
+    agent = ResearchLensAgent(foundry_client=mock_client)
+    comp = agent.compare_papers(papers=[paper_a, paper_b], engine=engine)
+    assert comp.status == "completed"
+    # Verify dimensions were recovered despite trailing truncation
+    assert "Research Objective" in comp.dimensions
+    assert comp.dimensions["Research Objective"].paper_summaries[paper_a.id] == "Transformers discard recurrence."
+    # custom_query_answer should be clean synthesized prose, not raw JSON
+    assert not comp.custom_query_answer.strip().startswith("{")
+    assert '"custom_query_answer"' not in comp.custom_query_answer
+
