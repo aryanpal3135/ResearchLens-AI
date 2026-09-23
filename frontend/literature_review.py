@@ -9,6 +9,7 @@ import json
 import streamlit as st
 
 from frontend.components import render_header, render_info_card
+from frontend.retrieval_ui import get_or_create_retrieval_engine, sync_papers_to_retrieval_engine
 from services.foundry_agent import ResearchLensAgent
 from services.retrieval import HybridRetrievalEngine
 from services.embeddings import get_embedding_service
@@ -188,27 +189,27 @@ def render_literature_review_page():
 
         with st.spinner("Synthesizing literature with Microsoft Foundry Agent (researchmate-gpt4-1-mini)..."):
             try:
-                emb_service = get_embedding_service()
-                vector_store = get_vector_store()
-                engine = HybridRetrievalEngine(embedding_service=emb_service, vector_store=vector_store)
-
-                for p in target_papers:
-                    if p.id not in [getattr(c, "paper_id", "") for c in engine.indexed_chunks]:
-                        engine.index_paper(p)
-
+                sync_papers_to_retrieval_engine()
+                engine = get_or_create_retrieval_engine()
                 agent = ResearchLensAgent()
 
                 # Reuse Phase 6 cached gaps if available in session state
-                cached_gap_res = st.session_state.get("research_gap_result")
+                cached_gap_res = st.session_state.get("research_gap_result") or st.session_state.get("research_gaps")
                 cached_gaps = None
-                if cached_gap_res and getattr(cached_gap_res, "gaps", None):
-                    cached_gaps = [g for g in cached_gap_res.gaps if any(pid in selected_paper_ids for pid in g.supporting_papers)]
+                if cached_gap_res:
+                    if hasattr(cached_gap_res, "gaps"):
+                        cached_gaps = [g for g in cached_gap_res.gaps if any(pid in selected_paper_ids for pid in getattr(g, "supporting_papers", []))]
+                    elif isinstance(cached_gap_res, list):
+                        cached_gaps = [g for g in cached_gap_res if any(pid in selected_paper_ids for pid in getattr(g, "supporting_papers", []))]
 
                 # Reuse Phase 7 cached future directions if available
-                cached_q_res = st.session_state.get("research_questions_result")
+                cached_q_res = st.session_state.get("research_questions_result") or st.session_state.get("future_directions")
                 cached_dirs = None
-                if cached_q_res and getattr(cached_q_res, "future_directions", None):
-                    cached_dirs = cached_q_res.future_directions
+                if cached_q_res:
+                    if hasattr(cached_q_res, "future_directions"):
+                        cached_dirs = cached_q_res.future_directions
+                    elif isinstance(cached_q_res, list):
+                        cached_dirs = cached_q_res
 
                 result = agent.generate_literature_review(
                     papers=target_papers,

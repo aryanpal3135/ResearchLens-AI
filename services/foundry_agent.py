@@ -1962,13 +1962,21 @@ class ResearchLensAgent:
         for p in papers:
             paper_evidence_map[p.id] = []
 
+        aspect_tasks = [(p, aspect_q) for p in papers for _, aspect_q in aspect_queries]
+        # Pre-compute all aspect query embeddings in a single batch to maximize parallel speed
+        batch_queries = [f"{p_obj.metadata.title or p_obj.filename} {aq}" for p_obj, aq in aspect_tasks]
+        try:
+            if hasattr(engine, "embedding_service"):
+                engine.embedding_service.generate_embeddings(batch_queries)
+        except Exception:
+            pass
+
         def _retrieve_aspect_query(task_tuple):
             p_obj, aspect_q = task_tuple
             combined_query = f"{p_obj.metadata.title or p_obj.filename} {aspect_q}"
             retrieved = engine.retrieve(query=combined_query, paper_ids=[p_obj.id], top_k=3)
             return p_obj.id, retrieved
 
-        aspect_tasks = [(p, aspect_q) for p in papers for _, aspect_q in aspect_queries]
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(aspect_tasks), 10)) as executor:
             retrieval_batches = list(executor.map(_retrieve_aspect_query, aspect_tasks))
 
@@ -2019,10 +2027,40 @@ class ResearchLensAgent:
             active_gaps = gaps
         else:
             try:
-                gap_res = self.detect_research_gaps(papers=papers, engine=engine, custom_query=active_focus)
-                active_gaps = gap_res.gaps
+                import streamlit as st
+                cached = st.session_state.get("research_gap_result") or st.session_state.get("research_gaps")
+                if cached:
+                    if hasattr(cached, "gaps"):
+                        active_gaps = [g for g in cached.gaps if any(pid in paper_ids for pid in getattr(g, "supporting_papers", []))]
+                    elif isinstance(cached, list):
+                        active_gaps = [g for g in cached if any(pid in paper_ids for pid in getattr(g, "supporting_papers", []))]
             except Exception:
-                active_gaps = []
+                pass
+
+            if not active_gaps:
+                gap_idx = 1
+                limitation_markers = ["limitation", "bottleneck", "trade-off", "constraint", "lack", "unable", "future work", "challenging"]
+                for p in papers:
+                    p_chunks = paper_evidence_map.get(p.id, [])
+                    for c in p_chunks:
+                        if c.normalized_section in ("Limitations", "Discussion", "Conclusion") or any(m in c.text.lower() for m in limitation_markers):
+                            active_gaps.append(ResearchGap(
+                                gap_id=f"gap_lit_{gap_idx:03d}",
+                                title=f"Identified Limitation in {p.id}: {c.normalized_section}",
+                                description=c.text[:220] + ("..." if len(c.text) > 220 else ""),
+                                category="Methodological Boundary",
+                                supporting_papers=[p.id],
+                                evidence_type="documented",
+                                evidence_type_label="Author Documented",
+                                evidence_support="High evidence support",
+                                evidence_items=[c],
+                                citation_labels=[c.citation_label],
+                            ))
+                            gap_idx += 1
+                            if gap_idx > 4:
+                                break
+                    if gap_idx > 4:
+                        break
 
         # Collect author-stated future work directly from retrieved chunks
         author_future_work: List[FutureDirection] = []
@@ -2130,24 +2168,25 @@ class ResearchLensAgent:
             "SYNTHESIS INSTRUCTIONS:\n"
             "1. Produce a structured, publication-grade academic literature review synthesizing the selected literature.\n"
             "2. DO NOT write sequential individual paper summaries. You MUST synthesize across the papers thematically, methodologically, and empirically.\n"
-            "3. Dynamic Themes: Extract 2 to 4 major research themes that emerge directly from the evidence passages. "
-            "For each theme, provide theme_id, title, description, supporting_papers, synthesis narrative, and support_level.\n"
-            "4. Methodological Synthesis: Contrast architectures, mechanisms, and training paradigms across the papers.\n"
-            "5. Findings Synthesis: Synthesize empirical results, benchmark performance, and quantitative evaluation.\n"
+            "3. Dynamic Themes: Extract 2 to 3 major research themes that emerge directly from the evidence passages. "
+            "For each theme, provide theme_id, title, description, supporting_papers, concise synthesis narrative (1 dense scholarly paragraph), and support_level.\n"
+            "4. Methodological Synthesis: Contrast architectures, mechanisms, and training paradigms across the papers (1-2 dense paragraphs).\n"
+            "5. Findings Synthesis: Synthesize empirical results, benchmark performance, and quantitative evaluation (1-2 dense paragraphs).\n"
             "6. Agreements, Differences & Contradictions:\n"
             "   - Detail common ground and methodological divergences.\n"
             "   - Neutral contradiction handling: If genuine empirical conflict exists, describe it neutrally. "
             "If no contradiction exists between the passages, you MUST explicitly state: 'No direct contradiction was identified in the retrieved evidence.'\n"
-            "7. Limitations & Research Gaps: Detail limitations acknowledged in the literature and integrate the identified research gaps.\n"
-            "8. Conclusion: Synthesize key takeaways and future research horizons.\n"
-            "9. Categorical Claim Classification: For every substantive section, assign claim_type as one of: "
+            "7. Limitations & Research Gaps: Detail limitations acknowledged in the literature and integrate the identified research gaps (1-2 dense paragraphs).\n"
+            "8. Conclusion: Synthesize key takeaways and future research horizons (1 concise paragraph).\n"
+            "9. Concision & Density: Write dense, publication-grade scholarly text (approx 100-150 words per section) packed with evidence citations. Avoid meta-commentary, conversational filler, or verbose repetition.\n"
+            "10. Categorical Claim Classification: For every substantive section, assign claim_type as one of: "
             "'DOCUMENTED', 'SYNTHESIS', 'INFERENCE', or 'INSUFFICIENT_EVIDENCE'.\n"
-            "10. STRICT ZERO IMPLEMENTATION / ARCHITECTURE LEAKAGE:\n"
+            "11. STRICT ZERO IMPLEMENTATION / ARCHITECTURE LEAKAGE:\n"
             "    - NEVER mention ResearchLens architecture, OpenAI models (GPT-4o, GPT-4), Azure models (text-embedding-3), RAG implementation details, semantic chunking algorithms, citation recall metrics, API token costs, GPU memory ceilings, or knowledge graph grounding unless explicitly discussed in the source paper text.\n"
-            "11. STRICT NUMERICAL GROUNDING:\n"
+            "12. STRICT NUMERICAL GROUNDING:\n"
             "    - NEVER invent percentages (e.g. '34%') or numerical metrics not present in the supplied passages.\n"
-            "12. Citation Format: Embed internal evidence citations like [paper_001, p. 3, §3.2] or [paper_002, chunk paper_002_c015].\n"
-            "12. Return strictly valid JSON adhering to this schema:\n"
+            "13. Citation Format: Embed internal evidence citations like [paper_001, p. 3, §3.2] or [paper_002, chunk paper_002_c015].\n"
+            "14. Return strictly valid JSON adhering to this schema:\n"
             "{\n"
             '  "title": "Academic Literature Review: ...",\n'
             '  "introduction": {\n'
@@ -2207,7 +2246,7 @@ class ResearchLensAgent:
             user_prompt=prompt_task,
             system_prompt=SYSTEM_PROMPT_LITERATURE_REVIEW_AGENT,
             temperature=0.15,
-            max_tokens=2400,
+            max_tokens=1500,
         )
         generation_latency_ms = (time.time() - gen_start) * 1000
 
