@@ -63,10 +63,10 @@ class TestVoiceMapping:
         assert "Spanish" in LANGUAGE_VOICE_MAP
 
     def test_english_voice(self):
-        """Verifies English resolves to the verified DragonHD neural voice."""
+        """Verifies English resolves to the high-speed neural voice."""
         service = AzureSpeechService(api_key="key")
-        assert service.get_voice_for_language("English") == "en-US-Ava:DragonHDLatestNeural"
-        assert service.get_voice_for_language("english") == "en-US-Ava:DragonHDLatestNeural"
+        assert service.get_voice_for_language("English") == "en-US-JennyNeural"
+        assert service.get_voice_for_language("english") == "en-US-JennyNeural"
 
     def test_hindi_voice(self):
         """Verifies Hindi resolves to the canonical neural voice."""
@@ -89,7 +89,7 @@ class TestVoiceMapping:
     def test_unknown_language_fallback(self):
         """Verifies unlisted language falls back safely to English voice."""
         service = AzureSpeechService(api_key="key")
-        assert service.get_voice_for_language("German") == "en-US-Ava:DragonHDLatestNeural"
+        assert service.get_voice_for_language("German") == "en-US-JennyNeural"
 
 
 class TestCitationCleaning:

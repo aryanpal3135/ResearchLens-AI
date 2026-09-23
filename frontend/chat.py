@@ -40,42 +40,40 @@ def handle_pdf_upload(uploaded_files: List[Any], processor: PDFProcessor, chunke
     if not uploaded_files:
         return
 
-    progress_bar = st.progress(0, text="Processing uploaded PDFs...")
-    engine = get_or_create_retrieval_engine()
     papers = st.session_state.get("uploaded_papers", [])
+    existing_filenames = {p.filename for p in papers}
+    new_files = [f for f in uploaded_files if f.name not in existing_filenames]
+    if not new_files:
+        return
 
-    for idx, uploaded_file in enumerate(uploaded_files):
-        filename = uploaded_file.name
-        file_bytes = uploaded_file.getvalue()
+    engine = get_or_create_retrieval_engine()
+    with st.status(f"📥 Processing and indexing {len(new_files)} research PDF(s)...", expanded=True) as status_box:
+        for idx, uploaded_file in enumerate(new_files):
+            filename = uploaded_file.name
+            file_bytes = uploaded_file.getvalue()
 
-        # 1. Validation
-        is_valid, msg = processor.validate_pdf(file_bytes, filename)
-        if not is_valid:
-            st.error(f"❌ Failed to ingest '{filename}': {msg}")
-            continue
+            st.write(f"🔍 Validating and extracting structured text for `{filename}`...")
+            is_valid, msg = processor.validate_pdf(file_bytes, filename)
+            if not is_valid:
+                st.error(f"❌ Failed to ingest '{filename}': {msg}")
+                continue
 
-        # Prevent duplicate in session
-        if any(p.filename == filename for p in papers):
-            continue
+            saved_path = processor.save_uploaded_file(file_bytes, filename)
+            paper_id = processor.generate_paper_id(len(papers))
+            paper_doc = processor.extract_document(saved_path, paper_id)
 
-        # 2. Save
-        saved_path = processor.save_uploaded_file(file_bytes, filename)
+            st.write(f"🧩 Chunking and indexing `{filename}` into Hybrid RAG vector store...")
+            chunker.chunk_document(paper_doc)
+            engine.index_paper(paper_doc)
 
-        # 3. Generate sequential ID
-        paper_id = processor.generate_paper_id(len(papers))
+            papers.append(paper_doc)
+            st.write(f"✅ Successfully cataloged **`[{paper_id}]`** {filename} ({paper_doc.page_count} pages, {len(paper_doc.chunks)} chunks).")
 
-        # 4. Deep Extraction
-        paper_doc = processor.extract_document(saved_path, paper_id)
+        st.session_state["uploaded_papers"] = papers
+        # Increment uploader version so the widget resets cleanly and doesn't re-trigger in a loop
+        st.session_state["chat_uploader_version"] = st.session_state.get("chat_uploader_version", 0) + 1
+        status_box.update(label=f"✅ Successfully indexed {len(new_files)} paper(s)!", state="complete", expanded=False)
 
-        # 5. Chunking & Indexing
-        chunker.chunk_document(paper_doc)
-        engine.index_paper(paper_doc)
-
-        papers.append(paper_doc)
-        progress_bar.progress((idx + 1) / len(uploaded_files), text=f"Indexed [{paper_id}] {filename}")
-
-    st.session_state["uploaded_papers"] = papers
-    st.success(f"✅ Successfully cataloged and indexed {len(uploaded_files)} paper(s) with verifiable chunks.")
     st.rerun()
 
 
@@ -150,11 +148,12 @@ def render_chat_page():
     if not papers:
         st.markdown("### 📥 Upload Research Paper(s)")
         st.caption("Upload one or more academic research PDFs. Text, structure, and tables are immediately chunked and indexed into the hybrid retrieval engine.")
+        up_ver = st.session_state.get("chat_uploader_version", 0)
         uploaded_files = st.file_uploader(
             label="Upload research PDFs",
             type=["pdf"],
             accept_multiple_files=True,
-            key="chat_initial_uploader",
+            key=f"chat_initial_uploader_{up_ver}",
             label_visibility="collapsed",
         )
         if uploaded_files:
@@ -169,7 +168,8 @@ def render_chat_page():
 
         col_up, col_clr = st.columns([3, 1])
         with col_up:
-            more_files = st.file_uploader("Add more PDFs:", type=["pdf"], accept_multiple_files=True, key="chat_more_uploader")
+            up_ver = st.session_state.get("chat_uploader_version", 0)
+            more_files = st.file_uploader("Add more PDFs:", type=["pdf"], accept_multiple_files=True, key=f"chat_more_uploader_{up_ver}")
             if more_files:
                 handle_pdf_upload(more_files, processor, chunker)
         with col_clr:
@@ -298,6 +298,7 @@ def render_chat_page():
                                     audio_bytes = speech_svc.synthesize_speech(
                                         text=msg["content"],
                                         language=current_lang,
+                                        max_chars=900,
                                     )
                                     st.session_state[audio_cache_key] = audio_bytes
                                     st.rerun()
@@ -356,6 +357,7 @@ def render_chat_page():
                                         audio_tr_bytes = speech_svc.synthesize_speech(
                                             text=tr_text,
                                             language=tr_lang,
+                                            max_chars=900,
                                         )
                                         st.session_state[audio_tr_cache_key] = audio_tr_bytes
                                         st.rerun()

@@ -108,10 +108,11 @@ class EmbeddingProvider(ABC):
                 normalized_vec = arr.tolist()
 
                 results[idx] = normalized_vec
+
+                # Save to RAM and disk cache with correct per-text cache key
+                cache_key = hashlib.sha256(f"{self.model_name}:{texts[idx]}".encode("utf-8")).hexdigest()
                 _GLOBAL_EMBED_CACHE[cache_key] = normalized_vec
 
-                # Save to cache
-                cache_key = hashlib.sha256(f"{self.model_name}:{texts[idx]}".encode("utf-8")).hexdigest()
                 cache_file = self.cache_dir / f"{cache_key}.json"
                 try:
                     with open(cache_file, "w", encoding="utf-8") as f:

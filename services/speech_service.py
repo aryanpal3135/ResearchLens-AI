@@ -63,7 +63,7 @@ class SpeechRecognitionResult:
 # Canonical voice mapping for ResearchLens AI supported languages (Text-to-Speech)
 # Uses ultra-fast, natural neural voices optimized for sub-1.5s real-time synthesis
 LANGUAGE_VOICE_MAP: Dict[str, str] = {
-    "English": "en-US-Ava:DragonHDLatestNeural",
+    "English": "en-US-JennyNeural",
     "Hindi": "hi-IN-SwaraNeural",
     "French": "fr-FR-DeniseNeural",
     "Spanish": "es-ES-ElviraNeural",
@@ -287,6 +287,11 @@ class AzureSpeechService:
             speechsdk.SpeechSynthesisOutputFormat.Riff16Khz16BitMonoPcm
         )
         speech_config.speech_synthesis_voice_name = voice_name
+
+        # Relax real-time and frame-interval thresholds to prevent spurious timeouts over high-latency networks
+        speech_config.set_property_by_name("SpeechServiceConnection_SynthFrameIntervalThresholdMs", "20000")
+        speech_config.set_property_by_name("SpeechServiceConnection_SynthRealTimeFactorThreshold", "10")
+
         return speech_config
 
     def _synthesize_single_chunk(self, chunk: str, voice_name: str) -> bytes:
@@ -320,7 +325,7 @@ class AzureSpeechService:
             _SYNTHESIZER_CACHE.pop(voice_name, None)
             raise SpeechSynthesisError(f"Azure Speech unexpected synthesis result reason: {result.reason}")
 
-    def synthesize_speech(self, text: str, language: str = "English") -> bytes:
+    def synthesize_speech(self, text: str, language: str = "English", max_chars: int = 1500) -> bytes:
         """
         Converts text to speech using Azure AI Speech, returning playable WAV audio bytes.
         Handles markdown cleaning, citation pronunciation, long answer chunking,
@@ -335,6 +340,15 @@ class AzureSpeechService:
         cleaned_text = self.clean_text_for_speech(text)
         if not cleaned_text:
             raise SpeechSynthesisError("Text content is empty after removing presentation markup.")
+
+        # Focus read-aloud on the core executive response (up to max_chars) to ensure rapid 1-3s generation
+        if max_chars and len(cleaned_text) > max_chars:
+            cut = cleaned_text[:max_chars]
+            last_boundary = max(cut.rfind(". "), cut.rfind(".\n"), cut.rfind("? "), cut.rfind("! "))
+            if last_boundary > max_chars // 2:
+                cleaned_text = cut[:last_boundary + 1].strip()
+            else:
+                cleaned_text = cut.strip()
 
         # Check in-memory audio cache for instant sub-millisecond retrieval
         cache_key = f"{language}:{hashlib.sha256(cleaned_text.encode('utf-8')).hexdigest()}"

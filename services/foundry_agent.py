@@ -389,6 +389,20 @@ class ResearchLensAgent:
                 max_tokens=max_tokens,
                 timeout=timeout,
             )
+            # If target agent failed and wasn't already the primary research agent, fallback to researchmate
+            if isinstance(res, dict) and not res.get("success") and route.agent_name != getattr(self.client, "research_agent_name", "researchmate-gpt4-1-mini"):
+                fb_name = getattr(self.client, "research_agent_name", "researchmate-gpt4-1-mini")
+                fb_res = self.client.run_agent(
+                    agent_name=fb_name,
+                    user_prompt=user_prompt,
+                    system_prompt=system_prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    timeout=min(timeout, 30.0),
+                )
+                if isinstance(fb_res, dict) and fb_res.get("success"):
+                    return fb_res
+
             # If a Mock was returned without dict content, check if generate_chat_response was mocked
             if isinstance(res, Mock) and hasattr(self.client, "generate_chat_response"):
                 gen_res = self.client.generate_chat_response(
@@ -608,7 +622,8 @@ class ResearchLensAgent:
             user_prompt=user_prompt,
             system_prompt=self.system_prompt,
             temperature=0.2,
-            max_tokens=2000,
+            max_tokens=1000,
+            timeout=25.0,
         )
 
         elapsed_ms = (time.time() - start_time) * 1000
