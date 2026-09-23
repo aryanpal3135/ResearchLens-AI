@@ -17,6 +17,12 @@ except ImportError:
     AZURE_PROJECTS_AVAILABLE = False
 
 
+# Process-level cached credentials and clients for rapid zero-overhead reuse
+_SHARED_CREDENTIAL: Optional[Any] = None
+_SHARED_PROJECT_CLIENT: Optional[Any] = None
+_SHARED_AGENT_CLIENTS: Dict[str, Any] = {}
+
+
 class MicrosoftFoundryClient:
     """
     Client for interacting with cloud-managed Microsoft Foundry Agents.
@@ -80,20 +86,29 @@ class MicrosoftFoundryClient:
 
     def get_credential(self) -> Any:
         """Returns the credential instance for Entra authentication."""
+        if self._credential is not None:
+            return self._credential
+
+        global _SHARED_CREDENTIAL
+        if _SHARED_CREDENTIAL is not None:
+            self._credential = _SHARED_CREDENTIAL
+            return self._credential
+
         # On Windows, ensure standard Azure CLI directory is present in PATH if installed
         az_standard_path = r"C:\Program Files\Microsoft SDKs\Azure\CLI2\wbin"
         if os.path.exists(az_standard_path) and az_standard_path not in os.environ.get("PATH", ""):
             os.environ["PATH"] = az_standard_path + os.pathsep + os.environ.get("PATH", "")
 
-        if self._credential is None and AZURE_PROJECTS_AVAILABLE:
+        if AZURE_PROJECTS_AVAILABLE:
             try:
                 from azure.identity import AzureCliCredential, ChainedTokenCredential
-                self._credential = ChainedTokenCredential(
+                _SHARED_CREDENTIAL = ChainedTokenCredential(
                     AzureCliCredential(process_timeout=60),
                     DefaultAzureCredential(process_timeout=60),
                 )
             except Exception:
-                self._credential = DefaultAzureCredential(process_timeout=60)
+                _SHARED_CREDENTIAL = DefaultAzureCredential(process_timeout=60)
+            self._credential = _SHARED_CREDENTIAL
         return self._credential
 
     def get_project_client(self) -> Optional[Any]:
@@ -101,16 +116,25 @@ class MicrosoftFoundryClient:
         if self._project_client is not None:
             return self._project_client
 
+        global _SHARED_PROJECT_CLIENT
+        default_ep = settings.FOUNDRY_PROJECT_ENDPOINT.strip().rstrip("/")
+        if self._credential is None and self.project_endpoint == default_ep and _SHARED_PROJECT_CLIENT is not None:
+            self._project_client = _SHARED_PROJECT_CLIENT
+            return self._project_client
+
         if not self.is_configured or not AZURE_PROJECTS_AVAILABLE:
             return None
 
         try:
             cred = self.get_credential()
-            self._project_client = AIProjectClient(
+            client = AIProjectClient(
                 endpoint=self.project_endpoint,
                 credential=cred,
                 allow_preview=True,
             )
+            self._project_client = client
+            if self._credential == _SHARED_CREDENTIAL and self.project_endpoint == default_ep:
+                _SHARED_PROJECT_CLIENT = client
             return self._project_client
         except Exception:
             return None
@@ -123,6 +147,10 @@ class MicrosoftFoundryClient:
         if agent_name in self._agent_clients:
             return self._agent_clients[agent_name]
 
+        if self._credential is None and agent_name in _SHARED_AGENT_CLIENTS:
+            self._agent_clients[agent_name] = _SHARED_AGENT_CLIENTS[agent_name]
+            return _SHARED_AGENT_CLIENTS[agent_name]
+
         proj_client = self.get_project_client()
         if not proj_client:
             return None
@@ -130,6 +158,8 @@ class MicrosoftFoundryClient:
         try:
             agent_openai = proj_client.get_openai_client(agent_name=agent_name)
             self._agent_clients[agent_name] = agent_openai
+            if self._credential == _SHARED_CREDENTIAL:
+                _SHARED_AGENT_CLIENTS[agent_name] = agent_openai
             return agent_openai
         except Exception:
             return None

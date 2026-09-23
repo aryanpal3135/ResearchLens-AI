@@ -13,6 +13,7 @@ Adheres strictly to Phase 4 architectural constraints:
 
 import time
 import re
+import concurrent.futures
 from typing import List, Dict, Any, Optional, Tuple, Set
 
 from config.settings import settings
@@ -654,14 +655,14 @@ class ResearchLensAgent:
     ) -> PaperSectionAnalysis:
         """
         Performs comprehensive 7-section academic analysis for a single research paper.
+        Executes section analyses concurrently for sub-7s rapid response.
         Strictly scopes retrieval to paper.id.
         """
         start_time = time.time()
         title_display = paper.metadata.title or paper.filename
-        sections_dict: Dict[str, AnalysisSectionItem] = {}
 
-        for sec_name, query_text, target_sections in SECTION_PROMPTS_DEFINITIONS:
-            # Retrieve evidence strictly for this paper
+        def _process_section(sec_tuple: Tuple[str, str, List[str]]) -> Tuple[str, AnalysisSectionItem]:
+            sec_name, query_text, _ = sec_tuple
             results = engine.retrieve(
                 query=query_text,
                 paper_ids=[paper.id],
@@ -670,14 +671,13 @@ class ResearchLensAgent:
             )
 
             if not results:
-                sections_dict[sec_name] = AnalysisSectionItem(
+                return sec_name, AnalysisSectionItem(
                     section_name=sec_name,
                     content=f"No direct evidence for '{sec_name}' could be located in {paper.id}.",
                     is_explicit=False,
                     evidence_items=[],
                     citation_labels=[]
                 )
-                continue
 
             bundle = self.bundler.build_bundle(query=query_text, results=results, retrieval_mode="hybrid")
             citation_labels = [item.citation_label for item in bundle.items]
@@ -702,13 +702,18 @@ class ResearchLensAgent:
 
             content_text = res.get("content", "").strip() if res.get("success") else f"Analysis error: {res.get('error')}"
 
-            sections_dict[sec_name] = AnalysisSectionItem(
+            return sec_name, AnalysisSectionItem(
                 section_name=sec_name,
                 content=content_text,
                 is_explicit=True,
                 evidence_items=bundle.items,
                 citation_labels=citation_labels
             )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(SECTION_PROMPTS_DEFINITIONS), 7)) as executor:
+            processed_items = list(executor.map(_process_section, SECTION_PROMPTS_DEFINITIONS))
+
+        sections_dict: Dict[str, AnalysisSectionItem] = {sec_name: item for sec_name, item in processed_items}
 
         elapsed_ms = (time.time() - start_time) * 1000
         return PaperSectionAnalysis(
@@ -750,29 +755,27 @@ class ResearchLensAgent:
             paper_b.id: paper_b.metadata.title or paper_b.filename,
         }
 
-        # Step 1: Strict Per-Paper Evidence Retrieval across the 10 dimensions
+        # Step 1: Strict Per-Paper Evidence Retrieval across the 10 dimensions concurrently
         paper_a_dim_evidence: Dict[str, List[EvidenceItem]] = {}
         paper_b_dim_evidence: Dict[str, List[EvidenceItem]] = {}
         all_evidence: List[EvidenceItem] = []
 
-        for dim_name, query_intent, _ in COMPARISON_DIMENSIONS:
-            # Retrieve strictly for Paper A
+        def _retrieve_dim(dim_item):
+            dim_name, query_intent, _ = dim_item
             res_a = engine.retrieve(query=query_intent, paper_ids=[paper_a.id], top_k=3, search_mode="hybrid")
-            if res_a:
-                bundle_a = self.bundler.build_bundle(query=query_intent, results=res_a, retrieval_mode="hybrid")
-                paper_a_dim_evidence[dim_name] = bundle_a.items
-                all_evidence.extend(bundle_a.items)
-            else:
-                paper_a_dim_evidence[dim_name] = []
-
-            # Retrieve strictly for Paper B
+            b_a = self.bundler.build_bundle(query=query_intent, results=res_a, retrieval_mode="hybrid").items if res_a else []
             res_b = engine.retrieve(query=query_intent, paper_ids=[paper_b.id], top_k=3, search_mode="hybrid")
-            if res_b:
-                bundle_b = self.bundler.build_bundle(query=query_intent, results=res_b, retrieval_mode="hybrid")
-                paper_b_dim_evidence[dim_name] = bundle_b.items
-                all_evidence.extend(bundle_b.items)
-            else:
-                paper_b_dim_evidence[dim_name] = []
+            b_b = self.bundler.build_bundle(query=query_intent, results=res_b, retrieval_mode="hybrid").items if res_b else []
+            return dim_name, b_a, b_b
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(COMPARISON_DIMENSIONS), 10)) as executor:
+            dim_results = list(executor.map(_retrieve_dim, COMPARISON_DIMENSIONS))
+
+        for dim_name, b_a, b_b in dim_results:
+            paper_a_dim_evidence[dim_name] = b_a
+            all_evidence.extend(b_a)
+            paper_b_dim_evidence[dim_name] = b_b
+            all_evidence.extend(b_b)
 
         # Optional Custom Query retrieval strictly per-paper
         custom_ev_a: List[EvidenceItem] = []
@@ -1071,13 +1074,19 @@ class ResearchLensAgent:
             seen_chunk_ids = set()
             paper_items: List[EvidenceItem] = []
 
-            for topic_name, topic_query in search_topics:
-                retrieved_chunks = engine.retrieve(
+            def _retrieve_gap_topic(topic_tuple):
+                _, topic_query = topic_tuple
+                return engine.retrieve(
                     query=topic_query,
                     paper_ids=[paper.id],
                     top_k=top_k_per_topic,
                     search_mode="hybrid",
                 )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(search_topics), 8)) as executor:
+                topic_results = list(executor.map(_retrieve_gap_topic, search_topics))
+
+            for retrieved_chunks in topic_results:
                 for item_obj in retrieved_chunks:
                     actual_chunk = item_obj.chunk if hasattr(item_obj, "chunk") else item_obj
                     if actual_chunk.chunk_id in seen_chunk_ids:
@@ -1950,31 +1959,40 @@ class ResearchLensAgent:
 
         for p in papers:
             paper_evidence_map[p.id] = []
-            for aspect_name, aspect_q in aspect_queries:
-                combined_query = f"{p.metadata.title or p.filename} {aspect_q}"
-                retrieved = engine.retrieve(query=combined_query, paper_ids=[p.id], top_k=3)
-                for res in retrieved:
-                    c = res.chunk
-                    if c.chunk_id not in seen_chunk_ids:
-                        seen_chunk_ids.add(c.chunk_id)
-                        sec_str = c.normalized_section or "Section"
-                        page_val = getattr(c, "page_start", None) or getattr(c, "page", 1)
-                        citation_lbl = f"[{p.id}, p. {page_val}, §{sec_str}]"
-                        ev_item = EvidenceItem(
-                            evidence_id=f"ev_{c.chunk_id}",
-                            paper_id=p.id,
-                            chunk_id=c.chunk_id,
-                            page_start=page_val,
-                            page_end=getattr(c, "page_end", page_val),
-                            normalized_section=sec_str,
-                            original_heading=getattr(c, "original_heading", sec_str),
-                            content_type=getattr(c, "content_type", "body"),
-                            score=round(getattr(res, "score", 0.0), 4),
-                            text=c.text,
-                            citation_label=citation_lbl,
-                        )
-                        paper_evidence_map[p.id].append(ev_item)
-                        all_evidence.append(ev_item)
+
+        def _retrieve_aspect_query(task_tuple):
+            p_obj, aspect_q = task_tuple
+            combined_query = f"{p_obj.metadata.title or p_obj.filename} {aspect_q}"
+            retrieved = engine.retrieve(query=combined_query, paper_ids=[p_obj.id], top_k=3)
+            return p_obj.id, retrieved
+
+        aspect_tasks = [(p, aspect_q) for p in papers for _, aspect_q in aspect_queries]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(aspect_tasks), 10)) as executor:
+            retrieval_batches = list(executor.map(_retrieve_aspect_query, aspect_tasks))
+
+        for p_id, retrieved in retrieval_batches:
+            for res in retrieved:
+                c = res.chunk
+                if c.chunk_id not in seen_chunk_ids:
+                    seen_chunk_ids.add(c.chunk_id)
+                    sec_str = c.normalized_section or "Section"
+                    page_val = getattr(c, "page_start", None) or getattr(c, "page", 1)
+                    citation_lbl = f"[{p_id}, p. {page_val}, §{sec_str}]"
+                    ev_item = EvidenceItem(
+                        evidence_id=f"ev_{c.chunk_id}",
+                        paper_id=p_id,
+                        chunk_id=c.chunk_id,
+                        page_start=page_val,
+                        page_end=getattr(c, "page_end", page_val),
+                        normalized_section=sec_str,
+                        original_heading=getattr(c, "original_heading", sec_str),
+                        content_type=getattr(c, "content_type", "body"),
+                        score=round(getattr(res, "score", 0.0), 4),
+                        text=c.text,
+                        citation_label=citation_lbl,
+                    )
+                    paper_evidence_map[p_id].append(ev_item)
+                    all_evidence.append(ev_item)
 
         retrieval_latency_ms = (time.time() - retrieval_start) * 1000
 

@@ -18,6 +18,10 @@ from config.settings import settings
 from models.paper import DocumentChunk
 
 
+# Module-level fast RAM cache for embedding vectors across all instances and reruns
+_GLOBAL_EMBED_CACHE: Dict[str, List[float]] = {}
+
+
 class EmbeddingProvider(ABC):
     """Abstract Base Class for Document and Query Embedding Providers."""
 
@@ -61,7 +65,7 @@ class EmbeddingProvider(ABC):
     def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
         """
         Generates normalized embedding vectors for a list of texts,
-        using disk caching to avoid redundant computation.
+        using RAM and disk caching to avoid redundant computation.
         """
         if not texts:
             return []
@@ -70,16 +74,14 @@ class EmbeddingProvider(ABC):
         missing_indices: List[int] = []
         missing_texts: List[str] = []
 
-        # In-memory session cache
-        if not hasattr(self, "_mem_cache"):
-            self._mem_cache: Dict[str, List[float]] = {}
-
         for idx, text in enumerate(texts):
             cache_key = hashlib.sha256(f"{self.model_name}:{text}".encode("utf-8")).hexdigest()
-            if cache_key in self._mem_cache:
-                results[idx] = self._mem_cache[cache_key]
+            # 1. Global in-memory RAM cache check (instant <0.01ms)
+            if cache_key in _GLOBAL_EMBED_CACHE:
+                results[idx] = _GLOBAL_EMBED_CACHE[cache_key]
                 continue
 
+            # 2. Disk file cache check
             cache_file = self.cache_dir / f"{cache_key}.json"
             if cache_file.exists():
                 try:
@@ -87,7 +89,7 @@ class EmbeddingProvider(ABC):
                         cached_vec = json.load(f)
                         if len(cached_vec) == self.dimension:
                             results[idx] = cached_vec
-                            self._mem_cache[cache_key] = cached_vec
+                            _GLOBAL_EMBED_CACHE[cache_key] = cached_vec
                             continue
                 except Exception:
                     pass
@@ -106,7 +108,7 @@ class EmbeddingProvider(ABC):
                 normalized_vec = arr.tolist()
 
                 results[idx] = normalized_vec
-                self._mem_cache[cache_key] = normalized_vec
+                _GLOBAL_EMBED_CACHE[cache_key] = normalized_vec
 
                 # Save to cache
                 cache_key = hashlib.sha256(f"{self.model_name}:{texts[idx]}".encode("utf-8")).hexdigest()

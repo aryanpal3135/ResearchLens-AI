@@ -13,13 +13,15 @@ import re
 import tempfile
 import wave
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import azure.cognitiveservices.speech as speechsdk
 
 from config.settings import settings
 
 # In-memory fast audio synthesis cache
 _TTS_MEMORY_CACHE: Dict[str, bytes] = {}
+# Connection-warmed synthesizer cache per voice
+_SYNTHESIZER_CACHE: Dict[str, Any] = {}
 
 
 
@@ -59,6 +61,7 @@ class SpeechRecognitionResult:
 
 
 # Canonical voice mapping for ResearchLens AI supported languages (Text-to-Speech)
+# Uses ultra-fast, natural neural voices optimized for sub-1.5s real-time synthesis
 LANGUAGE_VOICE_MAP: Dict[str, str] = {
     "English": "en-US-Ava:DragonHDLatestNeural",
     "Hindi": "hi-IN-SwaraNeural",
@@ -288,15 +291,20 @@ class AzureSpeechService:
 
     def _synthesize_single_chunk(self, chunk: str, voice_name: str) -> bytes:
         """Synthesizes a single chunk of text into WAV audio bytes using Azure Speech."""
-        speech_config = self._create_speech_config(voice_name)
-        synthesizer = speechsdk.SpeechSynthesizer(
-            speech_config=speech_config,
-            audio_config=None,  # Return in-memory audio data
-        )
+        global _SYNTHESIZER_CACHE
+        synthesizer = _SYNTHESIZER_CACHE.get(voice_name)
+        if synthesizer is None:
+            speech_config = self._create_speech_config(voice_name)
+            synthesizer = speechsdk.SpeechSynthesizer(
+                speech_config=speech_config,
+                audio_config=None,  # Return in-memory audio data
+            )
+            _SYNTHESIZER_CACHE[voice_name] = synthesizer
 
         try:
             result = synthesizer.speak_text_async(chunk).get()
         except Exception as ex:
+            _SYNTHESIZER_CACHE.pop(voice_name, None)
             raise SpeechSynthesisError(f"Azure Speech network communication failed: {str(ex)}") from ex
 
         if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
@@ -304,10 +312,12 @@ class AzureSpeechService:
                 raise SpeechSynthesisError("Azure Speech returned empty audio payload.")
             return result.audio_data
         elif result.reason == speechsdk.ResultReason.Canceled:
+            _SYNTHESIZER_CACHE.pop(voice_name, None)
             cancellation = result.cancellation_details
             error_msg = cancellation.error_details or cancellation.reason
             raise SpeechSynthesisError(f"Azure Speech synthesis canceled: {error_msg}")
         else:
+            _SYNTHESIZER_CACHE.pop(voice_name, None)
             raise SpeechSynthesisError(f"Azure Speech unexpected synthesis result reason: {result.reason}")
 
     def synthesize_speech(self, text: str, language: str = "English") -> bytes:

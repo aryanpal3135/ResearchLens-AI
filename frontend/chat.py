@@ -692,7 +692,10 @@ def render_chat_page():
 
             with st.chat_message("assistant"):
                 with st.spinner("Generating research questions via Foundry Agent (`researchmate-gpt4-1-mini`)..."):
-                    res = agent.generate_research_questions(papers=target_papers, engine=engine)
+                    cached_gaps = st.session_state.get("research_gaps") or None
+                    res = agent.generate_research_questions(papers=target_papers, engine=engine, gaps=cached_gaps)
+                    if hasattr(res, "gaps") and res.gaps:
+                        st.session_state["research_gaps"] = res.gaps
                     q_text = f"### ❓ Grounded Research Questions ({len(res.questions)} Generated)\n\n"
                     for q in res.questions:
                         q_text += f"- **`[{q.display_id}]`** {q.question}\n  *Type:* `{q.question_type}` | *Papers:* `{', '.join(q.supporting_paper_ids)}`\n"
@@ -720,7 +723,10 @@ def render_chat_page():
 
             with st.chat_message("assistant"):
                 with st.spinner("Extracting future directions via Foundry Agent (`researchmate-gpt4-1-mini`)..."):
-                    res = agent.generate_research_questions(papers=target_papers, engine=engine)
+                    cached_gaps = st.session_state.get("research_gaps") or None
+                    res = agent.generate_research_questions(papers=target_papers, engine=engine, gaps=cached_gaps)
+                    if hasattr(res, "gaps") and res.gaps:
+                        st.session_state["research_gaps"] = res.gaps
                     fd_text = f"### 🔮 Future Research Directions ({len(res.future_directions)} Directions)\n\n"
                     for fd in res.future_directions:
                         fd_text += f"- **[{fd.direction_type.upper()}]** {fd.statement}\n  *Rationale:* {fd.rationale}\n"
@@ -748,7 +754,9 @@ def render_chat_page():
 
             with st.chat_message("assistant"):
                 with st.spinner("Synthesizing literature review via Foundry Agent (`researchmate-gpt4-1-mini`)..."):
-                    res = agent.generate_literature_review(papers=target_papers, engine=engine)
+                    cached_gaps = st.session_state.get("research_gaps") or None
+                    cached_fds = st.session_state.get("future_directions") or None
+                    res = agent.generate_literature_review(papers=target_papers, engine=engine, gaps=cached_gaps, future_directions=cached_fds)
                     lit_text = f"### 📚 {res.title}\n\n"
                     lit_text += f"**Introduction:**\n{res.introduction}\n\n"
                     lit_text += f"**Methodological Synthesis:**\n{res.methodological_synthesis}\n\n"
